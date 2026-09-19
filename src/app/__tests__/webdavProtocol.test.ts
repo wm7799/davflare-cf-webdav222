@@ -124,6 +124,31 @@ describe("webdav OPTIONS / redirect / auth", () => {
     ]) {
       expect(allow).toContain(method);
     }
+    // CORS 预检基线（对齐 Caddy 反代配置）：预检缓存 20 天、
+    // 暴露 Allow 给客户端，并带统一安全头。
+    expect(response.headers.get("Access-Control-Max-Age")).toBe("1728000");
+    expect(response.headers.get("Access-Control-Expose-Headers") ?? "")
+      .toContain("allow");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(response.headers.get("X-Frame-Options")).toBe("SAMEORIGIN");
+  });
+
+  test("every WebDAV response carries nosniff and SAMEORIGIN", async () => {
+    const bucket = new InMemoryBucket();
+    bucket.seed([{ key: "a.txt", body: "x" }]);
+    const unauthorized = await call(req("/webdav/a.txt", "GET"), makeEnv(bucket));
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(unauthorized.headers.get("X-Frame-Options")).toBe("SAMEORIGIN");
+
+    const env = makeEnv(bucket);
+    const file = await call(
+      req("/webdav/a.txt", "GET", { Authorization: AUTH }),
+      env
+    );
+    expect(file.status).toBe(200);
+    expect(file.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(file.headers.get("X-Frame-Options")).toBe("SAMEORIGIN");
   });
 
   test("/webdav without trailing slash is a 307 redirect (no auth needed)", async () => {

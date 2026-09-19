@@ -2343,10 +2343,16 @@ function addCorsHeaders(response: Response, request: Request): Response {
       "date",
       "content-range",
       "lock-token",
+      "allow",
     ].join(", "),
   );
   response.headers.set("Access-Control-Allow-Credentials", "false");
-  response.headers.set("Access-Control-Max-Age", "86400");
+  // 20 天（对齐常见反向代理基线）：预检结果让浏览器缓存，避免每个跨域请求前都打一次 OPTIONS。
+  response.headers.set("Access-Control-Max-Age", "1728000");
+  // 全响应统一安全头：nosniff 防嗅探改判类型；文件流会被前端同源 iframe 预览
+  // （PDF/文本），用 SAMEORIGIN 拦跨站嵌套同时保留站内预览。
+  response.headers.set("X-Content-Type-Options", "nosniff");
+  response.headers.set("X-Frame-Options", "SAMEORIGIN");
   return response;
 }
 

@@ -59,6 +59,20 @@ npm run build
 npx wrangler pages dev build
 ```
 
+## Health check
+
+`GET /health` (also `HEAD`) is a keyless liveness probe for uptime monitors, load balancers, and reverse proxies. It verifies the R2 binding with one listing call — an empty bucket still reports healthy.
+
+- `200` `{"status":"ok"}` — R2 binding reachable
+- `503` `{"status":"error","detail":"<error class>"}` — binding missing or R2 call failed (only the error class name is exposed)
+- Other methods → `405`; responses are sent with `Cache-Control: no-store`
+
+Example:
+
+```bash
+curl -fsS https://<your-domain>/health
+```
+
 ## Feature switches
 
 Owner-only Settings (`#/settings`, account menu) persist five flags in R2 at `_$flaredrive$/config.json` (survive deploys; not set in `wrangler.toml`). Default: all **on**.

@@ -22,6 +22,22 @@ FIXTURE="/tmp/fd-suite-$(date +%H%M%S)-$$.txt"
 echo "fixture-$(date +%s)" > "$FIXTURE"
 FIXNAME=$(basename "$FIXTURE")
 
+echo "== 健康检查 =="
+code=$(curl -s --noproxy '*' -o /tmp/o -w "%{http_code}" "$BASE/health")
+assert_code "health GET 200" "$code" "200"
+assert_contains "health status ok" "$(cat /tmp/o)" '"status":"ok"'
+code=$(curl -s --noproxy '*' -o /dev/null -w "%{http_code}" -X POST "$BASE/health")
+assert_code "health POST = 405" "$code" "405"
+
+echo "== WebDAV OPTIONS / 安全头（对齐反代基线）=="
+OPT_HEADERS=$(curl -s --noproxy '*' -D - -o /dev/null -X OPTIONS "$BASE/webdav/" | tr 'A-Z' 'a-z')
+assert_contains "OPTIONS DAV 1,2" "$OPT_HEADERS" "dav: 1, 2"
+assert_contains "OPTIONS Allow PROPFIND/LOCK" "$OPT_HEADERS" "allow: options, propfind"
+assert_contains "OPTIONS preflight max-age 1728000" "$OPT_HEADERS" "access-control-max-age: 1728000"
+assert_contains "OPTIONS allow destination/overwrite/lock-token/timeout" "$OPT_HEADERS" "destination"
+assert_contains "webdav nosniff" "$OPT_HEADERS" "x-content-type-options: nosniff"
+assert_contains "webdav frame sameorigin" "$OPT_HEADERS" "x-frame-options: sameorigin"
+
 echo "== setup: API key =="
 KEY=$(curl -s --noproxy '*' -X POST "$BASE/api/keys" -H "$BASIC" -H "Content-Type: application/json" -d '{"name":"suite"}' | python3 -c "import sys,json;print(json.load(sys.stdin)['key'])")
 if [ -z "$KEY" ]; then echo "无法创建 API key，请检查 BASE/凭据"; exit 1; fi
