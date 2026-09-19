@@ -683,13 +683,15 @@ describe("webdav PUT", () => {
     expect(response.status).toBe(405);
   });
 
-  test("PUT with missing parent is 409", async () => {
+  test("PUT with missing parent auto-creates parents (create_full_put_path)", async () => {
     const bucket = new InMemoryBucket();
     const response = await call(
       req("/webdav/ghost/child.txt", "PUT", { Authorization: AUTH }, "x"),
       makeEnv(bucket)
     );
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(201);
+    expect(bucket.has("ghost/child.txt")).toBe(true);
+    expect(bucket.has("ghost")).toBe(true);
   });
 
   test("PUT into internal prefix (non-thumbnail) is 404", async () => {
@@ -1458,5 +1460,108 @@ describe("webdav POST multipart (uploads/complete)", () => {
     );
     expect(response.status).toBe(405);
     expect(response.headers.get("Allow")).toContain("PUT");
+  });
+});
+
+describe("webdav create_full_put_path & content-type inference", () => {
+  test("PUT into missing parents auto-creates them (no 409)", async () => {
+    const bucket = new InMemoryBucket();
+    const response = await call(
+      req("/webdav/deep/nested/dir/a.txt", "PUT", { Authorization: AUTH }, "x"),
+      makeEnv(bucket)
+    );
+    expect(response.status).toBe(201);
+    for (const dir of ["deep", "deep/nested", "deep/nested/dir"]) {
+      const listing = await call(
+        req(`/webdav/${dir}/`, "GET", { Authorization: AUTH }),
+        makeEnv(bucket)
+      );
+      expect(listing.status).toBe(200);
+    }
+    const file = await call(
+      req("/webdav/deep/nested/dir/a.txt", "GET", { Authorization: AUTH }),
+      makeEnv(bucket)
+    );
+    expect(await file.text()).toBe("x");
+  });
+
+  test("PUT without Content-Type infers from extension", async () => {
+    const bucket = new InMemoryBucket();
+    for (const [name, expected] of [
+      ["a.txt", "text/plain"],
+      ["b.png", "image/png"],
+      ["c.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+    ] as const) {
+      // undici 对 string body 会自动补 text/plain，这里用字节 body 模拟未带类型的客户端。
+      const put = await call(
+        req(`/webdav/notes/${name}`, "PUT", { Authorization: AUTH }, new Uint8Array([1, 2, 3])),
+        makeEnv(bucket)
+      );
+      expect(put.status).toBe(201);
+      const get = await call(
+        req(`/webdav/notes/${name}`, "GET", { Authorization: AUTH }),
+        makeEnv(bucket)
+      );
+      expect(get.headers.get("Content-Type")).toBe(expected);
+
+      const propfind = await call(
+        req("/webdav/notes/", "PROPFIND", { Authorization: AUTH, Depth: "1" }),
+        makeEnv(bucket)
+      );
+      expect(propfind.status).toBe(207);
+      const xml = await propfind.text();
+      expect(xml).toContain(`<getcontenttype>${expected}</getcontenttype>`);
+    }
+  });
+
+  test("explicit Content-Type wins over extension inference", async () => {
+    const bucket = new InMemoryBucket();
+    const put = await call(
+      req(
+        "/webdav/blob.bin",
+        "PUT",
+        { Authorization: AUTH, "Content-Type": "text/plain" },
+        "data"
+      ),
+      makeEnv(bucket)
+    );
+    expect(put.status).toBe(201);
+    const get = await call(
+      req("/webdav/blob.bin", "GET", { Authorization: AUTH }),
+      makeEnv(bucket)
+    );
+    expect(get.headers.get("Content-Type")).toBe("text/plain");
+  });
+
+  test("extensionless files without Content-Type stay octet-stream", async () => {
+    const bucket = new InMemoryBucket();
+    const put = await call(
+      req("/webdav/README", "PUT", { Authorization: AUTH }, new Uint8Array([1, 2, 3])),
+      makeEnv(bucket)
+    );
+    expect(put.status).toBe(201);
+    const get = await call(
+      req("/webdav/README", "GET", { Authorization: AUTH }),
+      makeEnv(bucket)
+    );
+    expect(get.headers.get("Content-Type")).toBe("application/octet-stream");
+  });
+
+  test("GET infers content-type for stored octet-stream objects", async () => {
+    const bucket = new InMemoryBucket();
+    bucket.seed([
+      { key: "legacy.pdf", body: "pdf", contentType: "application/octet-stream" },
+      { key: "mystery", body: "x" },
+    ]);
+    const pdf = await call(
+      req("/webdav/legacy.pdf", "GET", { Authorization: AUTH }),
+      makeEnv(bucket)
+    );
+    expect(pdf.headers.get("Content-Type")).toBe("application/pdf");
+    const mystery = await call(
+      req("/webdav/mystery", "GET", { Authorization: AUTH }),
+      makeEnv(bucket)
+    );
+    expect(mystery.headers.get("Content-Type")).toBe("application/octet-stream");
   });
 });

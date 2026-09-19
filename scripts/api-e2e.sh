@@ -300,6 +300,17 @@ assert_code "wrong password 401" "$code" "401"
 code=$(curl -s --noproxy '*' -o /dev/null -w "%{http_code}" -X PUT "$BASE/webdav/$DIR/dav.txt" -H "$BASIC" --data-binary "dav")
 assert_code "PUT 201" "$code" "201"
 assert_contains "GET content" "$(curl -s --noproxy '*' "$BASE/webdav/$DIR/dav.txt" -H "$BASIC")" "dav"
+
+echo "== WebDAV create_full_put_path / mime 推断（对齐 nginx 基线）=="
+code=$(curl -s --noproxy '*' -o /dev/null -w "%{http_code}" -X PUT "$BASE/webdav/$DIR/fullput/a/b/c.txt" -H "$BASIC" --data-binary "deep")
+assert_code "PUT nested missing parents 201" "$code" "201"
+assert_contains "auto-created parent listed" "$(curl -s --noproxy '*' "$BASE/webdav/$DIR/fullput/" -H "$BASIC")" "a/"
+curl -s --noproxy '*' -o /dev/null -X PUT "$BASE/webdav/$DIR/mime/notype.png" -H "$BASIC" -H "Content-Type;" --data-binary "pngdata"
+code=$(curl -s --noproxy '*' -o /dev/null -w "%{http_code}" "$BASE/webdav/$DIR/mime/notype.png" -H "$BASIC")
+assert_code "GET no-type png 200" "$code" "200"
+ctype=$(curl -s --noproxy '*' -D - -o /dev/null "$BASE/webdav/$DIR/mime/notype.png" -H "$BASIC" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Tt]ype: //p')
+assert_contains "inferred png content-type" "$ctype" "image/png"
+
 code=$(curl -s --noproxy '*' -o /dev/null -w "%{http_code}" -X MOVE "$BASE/webdav/$DIR/dav.txt" -H "$BASIC" -H "Destination: /webdav/$DIR/dav-moved.txt")
 assert_code "MOVE 201" "$code" "201"
 code=$(curl -s --noproxy '*' -o /dev/null -w "%{http_code}" -X DELETE "$BASE/webdav/_\$flaredrive\$/evil.txt" -H "$BASIC" --data-binary x)

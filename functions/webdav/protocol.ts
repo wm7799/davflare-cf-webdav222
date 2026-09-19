@@ -89,6 +89,113 @@ type DavObject = {
 const DEFAULT_LOCK_TIMEOUT = 3600;
 const MAX_LOCK_TIMEOUT = 365 * 24 * 60 * 60;
 const VALID_LOCK_DEPTHS = ["0", "infinity"] as const;
+
+// nginx mime.types 等价的扩展名推断表（精简常见类型）。
+// 语义：客户端 PUT 缺失 Content-Type（或通用 octet-stream）时按扩展名兜底，
+// GET/PROPFIND 读取时对无类型对象兜底——对齐 nginx「存储无类型、读取按扩展名」的行为。
+const EXTENSION_CONTENT_TYPES: Record<string, string> = {
+  html: "text/html",
+  htm: "text/html",
+  css: "text/css",
+  js: "text/javascript",
+  mjs: "text/javascript",
+  json: "application/json",
+  txt: "text/plain",
+  md: "text/markdown",
+  csv: "text/csv",
+  xml: "application/xml",
+  yaml: "text/yaml",
+  yml: "text/yaml",
+  py: "text/x-python",
+  sh: "text/x-shellscript",
+  wasm: "application/wasm",
+  pdf: "application/pdf",
+  zip: "application/zip",
+  gz: "application/gzip",
+  tar: "application/x-tar",
+  "7z": "application/x-7z-compressed",
+  rar: "application/vnd.rar",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  avif: "image/avif",
+  heic: "image/heic",
+  svg: "image/svg+xml",
+  ico: "image/x-icon",
+  bmp: "image/bmp",
+  tiff: "image/tiff",
+  mp3: "audio/mpeg",
+  ogg: "audio/ogg",
+  wav: "audio/wav",
+  flac: "audio/flac",
+  m4a: "audio/mp4",
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
+  avi: "video/x-msvideo",
+  mkv: "video/x-matroska",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  woff: "font/woff",
+  woff2: "font/woff2",
+  ttf: "font/ttf",
+  otf: "font/otf",
+  epub: "application/epub+zip",
+  apk: "application/vnd.android.package-archive",
+};
+
+const GENERIC_CONTENT_TYPE = "application/octet-stream";
+
+function inferContentTypeFromExtension(key: string): string | undefined {
+  const name = key.split("/").pop() ?? "";
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return undefined;
+  return EXTENSION_CONTENT_TYPES[name.slice(dot + 1).toLowerCase()];
+}
+
+function resolveContentType(
+  stored: string | undefined,
+  key: string
+): string {
+  if (stored && stored !== GENERIC_CONTENT_TYPE) return stored;
+  const inferred = inferContentTypeFromExtension(key);
+  // 存储明确是 octet-stream 且扩展名可推断时优先扩展名；否则维持原值。
+  if (inferred) return inferred;
+  return stored ?? GENERIC_CONTENT_TYPE;
+}
+
+// 显式构造 R2 httpMetadata：字段与直接传 Headers 等价，但对缺失/通用的
+// Content-Type 按扩展名推断兜底（对齐 nginx mime.types 读取行为）。
+function buildHttpMetadata(headers: Headers, key: string): R2HTTPMetadata {
+  const metadata: R2HTTPMetadata = {};
+  const contentType = headers.get("Content-Type");
+  const inferred = inferContentTypeFromExtension(key);
+  if (contentType && contentType !== GENERIC_CONTENT_TYPE) {
+    metadata.contentType = contentType;
+  } else if (inferred) {
+    metadata.contentType = inferred;
+  } else if (contentType) {
+    metadata.contentType = contentType;
+  }
+  for (const [headerName, field] of [
+    ["Content-Disposition", "contentDisposition"],
+    ["Content-Encoding", "contentEncoding"],
+    ["Content-Language", "contentLanguage"],
+    ["Cache-Control", "cacheControl"],
+  ] as const) {
+    const value = headers.get(headerName);
+    if (value !== null) {
+      metadata[field] = value;
+    }
+  }
+  return metadata;
+}
 const LOCK_METADATA_KEYS = [
   "lock_token",
   "lock_owner",
@@ -277,6 +384,26 @@ async function isCollectionPath(
     limit: 1,
   });
   return descendants.objects.length > 0 || descendants.delimitedPrefixes.length > 0;
+}
+
+// 对齐 nginx `create_full_put_path on`：PUT 的中间父目录缺失时逐级创建目录
+// marker，替代原先的 409。rclone/Sardine/OneNote/Windows 保存对话框等客户端
+// 会直接 PUT 嵌套路径。调用方已先通过锁检查，这里仅负责建目录。
+async function ensureParentCollections(
+  bucket: R2Bucket,
+  resourcePath: string
+): Promise<void> {
+  const parts = resourcePath.split("/");
+  for (let depth = 1; depth < parts.length; depth++) {
+    const parent = parts.slice(0, depth).join("/");
+    if (parent === "" || (await hasCollectionResource(bucket, parent))) {
+      continue;
+    }
+    await bucket.put(parent, new Uint8Array(), {
+      httpMetadata: { contentType: "application/x-directory" },
+      customMetadata: { resourcetype: "<collection />" },
+    });
+  }
 }
 
 function parseDestinationPath(
@@ -771,7 +898,7 @@ function fromR2Object(object: R2Object | DavObject | null | undefined): DavPrope
     getcontentlength: object.size.toString(),
     getcontenttype: isCollection
       ? "application/x-directory"
-      : object.httpMetadata?.contentType || "application/octet-stream",
+      : resolveContentType(object.httpMetadata?.contentType, object.key),
     getetag: object.etag,
     getlastmodified: object.uploaded.toUTCString(),
     resourcetype: isCollection ? "<collection />" : "",
@@ -1152,7 +1279,10 @@ async function handleGet({
   const rangeRequested = request.headers.has("Range") && object.range !== undefined;
   const headers = new Headers();
   headers.set("Accept-Ranges", "bytes");
-  headers.set("Content-Type", object.httpMetadata?.contentType ?? "application/octet-stream");
+  headers.set(
+    "Content-Type",
+    resolveContentType(object.httpMetadata?.contentType, path)
+  );
   headers.set("Content-Length", contentLength.toString());
   headers.set("ETag", object.httpEtag);
   headers.set("Last-Modified", object.uploaded.toUTCString());
@@ -1265,8 +1395,9 @@ async function handlePut({
     if (await isCollectionPath(bucket, path)) {
       return new Response("Method Not Allowed", { status: 405 });
     }
+    // create_full_put_path 语义：父目录缺失时自动逐级创建（原为 409）。
     if (!(await hasCollectionResource(bucket, getParentPath(path)))) {
-      return new Response("Conflict", { status: 409 });
+      await ensureParentCollections(bucket, path);
     }
   }
 
@@ -1292,7 +1423,7 @@ async function handlePut({
 
   const result = await bucket.put(path, body, {
     onlyIf: getConditionalHeaders(request.headers),
-    httpMetadata: request.headers,
+    httpMetadata: buildHttpMetadata(request.headers, path),
     customMetadata: preservedMetadata,
   });
   if (!result) {
